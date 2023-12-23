@@ -35,7 +35,8 @@ fn is_remote_branch() -> bool {
     first_line.is_ok_and(|line| line.starts_with("## ") && line.contains("..."))
 }
 
-fn git_commit(message: &str) -> String {
+fn git_commit(message: String) -> Option<String> {
+    println!("Commiting commit");
     Command::new("git")
         .arg("add")
         .arg(".")
@@ -55,9 +56,38 @@ fn git_commit(message: &str) -> String {
         .expect("failed to push");
 
     let output = from_utf8(&command.stdout).expect("failed to parse push output");
+    output
+        .lines()
+        .find(|line| line.starts_with("https") && line.contains("/pull/"))
+        .map(|line| line.trim().to_string())
+}
+
+fn git_amend() {
+    println!("Amending commit");
+    Command::new("git")
+        .arg("add")
+        .arg(".")
+        .output()
+        .expect("failed to add");
+
+    Command::new("git")
+        .arg("commit")
+        .arg("--amend")
+        .arg("--no-edit")
+        .output()
+        .expect("failed to commit");
+
+    Command::new("git")
+        .arg("push")
+        .arg("--force")
+        .output()
+        .expect("failed to push");
 }
 
 fn main() {
+    let args = Args::parse();
+    println!("{:?}", args);
+
     let branch = get_current_branch();
     if branch == "main" || branch == "master" {
         eprintln!("You're on the master or main branch, you can't push to this branch");
@@ -66,14 +96,16 @@ fn main() {
 
     match is_remote_branch() {
         true => git_amend(),
-        false => git_commit(),
+        false => {
+            let pr_url = git_commit(args.message.unwrap());
+            if let Some(url) = pr_url {
+                Command::new("open")
+                    .arg(url)
+                    .output()
+                    .expect("failed to open browser");
+            }
+        }
     }
-
-    // If branch doesn't have a remote -- git status -sb -- then we're good, if it does, will switch to ammend workflow
-    // Git up will check whether this repo exists on a remote, and if so, do git ammend, no-edit, push
     // Can override the no-edit with a message
-    // If not, it will git add, commit and push, then open the url
     // Maybe use a flag to open url?
-    let args = Args::parse();
-    println!("{:?}", args);
 }
