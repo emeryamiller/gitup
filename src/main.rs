@@ -181,6 +181,7 @@ fn git_commit(message: String) -> Option<String> {
         .expect("failed to push");
 
     let output = from_utf8(&command.stdout).expect("failed to parse push output");
+    println!("{}", output);
     output
         .lines()
         .find(|line| line.starts_with("https") && line.contains("/pull/"))
