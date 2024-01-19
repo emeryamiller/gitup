@@ -1,6 +1,11 @@
-use clap::{Arg, Parser};
+mod commit_message;
+mod git;
+
+use clap::Parser;
+use commit_message::{Message, MessageKind};
+use git::{current_branch, git_amend, git_commit, is_remote_branch, new_pr_url, pr_url_for};
+use std::fmt::Display;
 use std::process::{exit, Command};
-use std::str::from_utf8;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about=None)]
@@ -9,71 +14,92 @@ struct Args {
     message: Option<String>,
     #[arg(short, long)]
     pull_request: bool,
+    #[arg(short, long)]
+    chore: bool,
+    #[arg(short = 'x', long)]
+    fix: bool,
+    #[arg(short, long)]
+    ignore_format: bool,
 }
 
-fn get_current_branch() -> String {
-    let output = Command::new("git")
-        .arg("branch")
-        .arg("--show-current")
-        .output()
-        .expect("failed to get current branch");
-
-    let branch = from_utf8(&output.stdout).expect("failed to parse current branch");
-
-    branch.trim().to_string()
+fn open_url(url: &str) {
+    Command::new("open")
+        .arg(url)
+        .status()
+        .expect("failed to open browser");
 }
 
-fn is_remote_branch() -> bool {
-    let output = Command::new("git")
-        .arg("status")
-        .arg("-sb")
-        .output()
-        .expect("failed to get branch status");
+fn compose_message(args: &Args, branch: &str) -> Option<Box<dyn Display>> {
+    if args.ignore_format {
+        return args
+            .message
+            .as_ref()
+            .map(|msg| Box::new(msg.clone()) as Box<dyn Display>);
+    }
 
-    let first_line = from_utf8(output.stdout.split(|&c| c == b'\n').next().unwrap());
+    let kind = if args.chore {
+        MessageKind::Chore
+    } else if args.fix {
+        MessageKind::Fix
+    } else {
+        MessageKind::Feature
+    };
 
-    first_line.is_ok_and(|line| line.starts_with("## ") && line.contains("..."))
-}
-
-fn git_commit(message: &str) -> String {
-    Command::new("git")
-        .arg("add")
-        .arg(".")
-        .output()
-        .expect("failed to add");
-
-    Command::new("git")
-        .arg("commit")
-        .arg("-m")
-        .arg(message)
-        .output()
-        .expect("failed to commit");
-
-    let command = Command::new("git")
-        .arg("push")
-        .output()
-        .expect("failed to push");
-
-    let output = from_utf8(&command.stdout).expect("failed to parse push output");
+    args.message.as_ref().map(|msg| {
+        let parsed_message = Message::parse(msg, branch, Some(kind));
+        if let Ok(message) = parsed_message {
+            Box::new(message) as Box<dyn Display>
+        } else {
+            let new_message = edit::edit(msg).expect("failed to edit message");
+            Box::new(Message::parse(&new_message, branch, Some(kind)).unwrap()) as Box<dyn Display>
+        }
+    })
 }
 
 fn main() {
-    let branch = get_current_branch();
+    let args = Args::parse();
+    let branch = current_branch();
     if branch == "main" || branch == "master" {
         eprintln!("You're on the master or main branch, you can't push to this branch");
         exit(1);
     }
+    let message = compose_message(&args, &branch);
 
     match is_remote_branch() {
-        true => git_amend(),
-        false => git_commit(),
-    }
+        true => {
+            match message {
+                Some(msg) => {
+                    git_commit(msg.to_string());
+                }
+                None => git_amend(),
+            };
+            if args.pull_request {
+                if let Some(url) = pr_url_for(&branch) {
+                    println!("Opening {}", url);
+                    open_url(url.as_str());
+                }
+            }
+        }
+        false => {
+            let msg = match message {
+                Some(m) => m,
+                None => {
+                    let new_message = edit::edit("").expect("failed to edit message");
+                    if new_message.is_empty() {
+                        eprintln!("You're on a local branch, you must provide a commit message");
+                        exit(1);
+                    }
+                    Box::new(Message::parse(&new_message, &branch, None).unwrap())
+                }
+            };
 
-    // If branch doesn't have a remote -- git status -sb -- then we're good, if it does, will switch to ammend workflow
-    // Git up will check whether this repo exists on a remote, and if so, do git ammend, no-edit, push
-    // Can override the no-edit with a message
-    // If not, it will git add, commit and push, then open the url
-    // Maybe use a flag to open url?
-    let args = Args::parse();
-    println!("{:?}", args);
+            let pr_url = git_commit(msg.to_string());
+            if let Some(url) = pr_url {
+                open_url(&url);
+            } else {
+                open_url(&new_pr_url(&branch));
+            }
+        }
+    }
+    // Second tool, poll for a period until PR passes all checks, then report back to slack
 }
